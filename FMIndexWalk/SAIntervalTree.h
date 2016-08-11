@@ -3,7 +3,7 @@
 // Written by Yao-Ting Huang
 // Released under the GPL
 //-----------------------------------------------
-
+//
 //
 // Re-written from Jared Simpson's StringThreaderNode and StringThreader class
 // The search tree represents a traversal through implicit FM-index graph
@@ -13,9 +13,10 @@
 
 #include <list>
 #include "BWT.h"
-#include "HashMap.h"
+//#include "HashMap.h"
+#include "typedef_IntervalMatchMap.h"
 #include "BWTAlgorithms.h"
-
+#include <omp.h>
 
 // Typedefs
 class SAIntervalNode;
@@ -26,6 +27,9 @@ struct SAIntervalNodeResult
 {
     std::string thread;
 	size_t SAICoverage;
+    std::vector<int64_t> pathIntervalBWT[2];  //mod2
+    std::vector<int64_t> pathIntervalRBWT[2];
+    std::vector<unsigned short> order;
 };
 typedef std::vector<SAIntervalNodeResult> SAIntervalNodeResultVector;
 
@@ -33,7 +37,7 @@ typedef std::vector<SAIntervalNodeResult> SAIntervalNodeResultVector;
 class SAIntervalNode
 {
     public:
-
+        
         //
         // Functions
         //
@@ -70,8 +74,12 @@ class SAIntervalNode
 
         BWTInterval fwdInterval;
         BWTInterval rvcInterval;
+        
+        //Interval
+        std::vector<int64_t> m_pathIntervalBWT[2]; //mod3
+        std::vector<int64_t> m_pathIntervalRBWT[2];
 
-    private:
+    //private:
 
         //
         // Data
@@ -85,11 +93,12 @@ class SAIntervalNode
 
         // The query string being threaded through the graph
         const std::string* m_pQuery;
+        
+        std::vector<unsigned short> m_order;//mod4
 
         // The parent node, can be NULL
         SAIntervalNode* m_pParent;
         STNodePtrList m_children;
-
 
 };
 
@@ -97,10 +106,19 @@ class SAIntervalTree
 {
     public:
         SAIntervalTree(const std::string* pQuery,
+                       SAIntervalNodeResult* resultthis,
+                       intervalPackage &intervalP,
+                       IntervalMatchMap* intervalMatchMapBWT,
+                       IntervalMatchMap* intervalMatchMapRBWT,
+                       bool &uniqueCase,
+                       size_t coverage,
+                       size_t compressionLevel,
                        size_t minOverlap,
 					   size_t maxOverlap,
                        size_t MaxLength,
                        size_t MaxLeaves,
+                       //size_t meaninsertsize,
+                       //size_t stddev,
 					   BWTIndexSet indices,
                        std::string secondread,
                        size_t SA_threshold=3,
@@ -140,14 +158,38 @@ class SAIntervalTree
         // Data
         //
         const std::string* m_pQuery;
+        SAIntervalNodeResult* m_resultthis; ///mod1-1
+        IntervalMatchMap *m_intervalMatchMapBWT;
+        IntervalMatchMap *m_intervalMatchMapRBWT;
+        IntervalMatchMap::accessor immAccessor;
+        size_t m_coverage;
+        size_t m_compressionLevel;
         size_t m_minOverlap;
 		size_t m_maxOverlap;
         size_t m_MaxLength;
         size_t m_MaxLeaves;
+        //size_t m_meaninsertsize;
+        //size_t m_stddev;
 		BWTIndexSet m_indices;
         std::string m_secondread;
         size_t m_min_SA_threshold;
         bool m_kmerMode;
+        
+        bool fwdReadsExisted[2]; //does beginning kmer or ending kmer exist in hash table? ([0] for begining, [1] for ending) //mod1-2
+        bool rvcReadsExisted[2];
+        int64_t intervalGap;
+        size_t atmosttimess;
+        BWTInterval beginningkmerBWT,beginningkmerRBWT,endingkmerBWT,endingkmerRBWT; //mod5
+        unsigned short beginningkmerOrder, endingkmerOrder;
+        std::vector<std::pair<int, unsigned short> > fwdBeginningIdOrder; //mod1-3
+        std::vector<std::pair<int, unsigned short> > rvcBeginningIdOrder;
+        std::vector<std::pair<int, unsigned short> > fwdEndingIdOrder;
+        std::vector<std::pair<int, unsigned short> > rvcEndingIdOrder;
+        int FBsize,FEsize,RBsize,REsize;
+        int FBid, FEid, RBid, REid;
+        unsigned short FBorder, FEorder, RBorder, REorder;
+        unsigned short cur_order;
+        unsigned short orderGap;
 
         SAIntervalNode* m_pRootNode;
         STNodePtrList m_leaves;
@@ -158,7 +200,7 @@ class SAIntervalTree
 		size_t m_maxUsedLeaves;
 		bool m_isBubbleCollapsed;
 
-        BWTInterval m_fwdTerminatedInterval;   //in rBWT
+        BWTInterval m_fwdTerminatedInterval;   //in rBWT 
         BWTInterval m_rvcTerminatedInterval;   //in BWT
 };
 
