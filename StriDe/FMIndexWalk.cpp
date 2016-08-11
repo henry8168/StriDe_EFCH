@@ -25,7 +25,8 @@
 #include "CorrectionThresholds.h"
 #include "KmerDistribution.h"
 #include "BWTIntervalCache.h"
-
+#include <omp.h>
+#define MaxInterval 10000000000
 
 //
 // Getopt
@@ -52,15 +53,16 @@ static const char *CORRECT_USAGE_MESSAGE =
 "      -x, --kmer-threshold=N           Attempt to correct kmers that are seen less than N times. (default: 3)\n"
 "      -L, --max-leaves=N               Number of maximum leaves in the search tree (default: 32)\n"
 "      -I, --max-insertsize=N           the maximum insert size (i.e. search depth) (deault: 400)\n"
-"      -m, --min-overlap=N           the min overlap (default: 81)\n"
-"      -M, --max-overlap=N           the max overlap (default: avg read length*0.9)\n"
+"      -m, --min-overlap=N              the min overlap (default: 81)\n"
+"      -M, --max-overlap=N              the max overlap (default: avg read length*0.9)\n"
+"      -c, --coverage=N                 coverage\n"
+"      -z, --compression-level=N        compression level(1~10)\n"
 
 "\nReport bugs to " PACKAGE_BUGREPORT "\n\n";
-
 static const char* PROGRAM_IDENT =
 PACKAGE_NAME "::" SUBPROGRAM;
 
-namespace opt
+namespace opt ///now
 {
     static unsigned int verbose;
     static int numThreads = 1;
@@ -76,14 +78,20 @@ namespace opt
     static bool bLearnKmerParams = false;
 
     static int maxLeaves=32;
-	static int maxInsertSize=400;
+    static int maxInsertSize=400;
 	static int minOverlap=81;
 	static int maxOverlap=-1;
+	static IntervalMatchMap* intervalMatchMapBWT=new IntervalMatchMap; ///mod4
+	static IntervalMatchMap* intervalMatchMapRBWT=new IntervalMatchMap;
+    static int coverage=100;
+    static int compressionLevel=0;
+    static int *idnum=new int(1);
+    static std::vector<itemsForOutput> *itemsForOutputVector = new std::vector<itemsForOutput>;
 
     static FMIndexWalkAlgorithm algorithm = FMW_HYBRID;
 }
 
-static const char* shortopts = "p:t:o:a:k:x:L:I:m:M:v";
+static const char* shortopts = "p:t:o:a:k:x:L:I:m:M:c:z:v";
 
 enum { OPT_HELP = 1, OPT_VERSION, OPT_METRICS, OPT_DISCARD, OPT_LEARN };
 
@@ -98,6 +106,8 @@ static const struct option longopts[] = {
     { "max-leaves",    required_argument, NULL, 'L' },
     { "max-insertsize",required_argument, NULL, 'I' },
     { "min-overlap"   ,required_argument, NULL, 'm' },
+    { "coverage"      ,required_argument, NULL, 'c' },
+    { "compress-level",required_argument, NULL, 'z' },
     { "learn",         no_argument,       NULL, OPT_LEARN },
     { "discard",       no_argument,       NULL, OPT_DISCARD },
     { "help",          no_argument,       NULL, OPT_HELP },
@@ -165,6 +175,13 @@ int FMindexWalkMain(int argc, char** argv)
 	ecParams.maxInsertSize = opt::maxInsertSize;
     ecParams.minOverlap = opt::minOverlap;
     ecParams.maxOverlap = opt::maxOverlap;
+    ecParams.coverage = opt::coverage; ///mod2
+    ecParams.compressionLevel = opt::compressionLevel;
+    ecParams.intervalMatchMapBWT = opt::intervalMatchMapBWT;
+    ecParams.intervalMatchMapRBWT = opt::intervalMatchMapRBWT;
+    ecParams.idnum = opt::idnum;
+    ecParams.itemsForOutputVector = opt::itemsForOutputVector;
+    ecParams.numThreads = opt::numThreads;
 	
     // Setup post-processor
     FMIndexWalkPostProcess postProcessor(pWriter, pDiscardWriter, ecParams);
@@ -174,14 +191,16 @@ int FMindexWalkMain(int argc, char** argv)
 				<< "max overlap=" <<  ecParams.maxOverlap << "\t"
 				<< "max leaves=" << opt::maxLeaves << "\t"
 				<< "max Insert size=" << opt::maxInsertSize << "\t"
-				<< "kmer size=" << opt::kmerLength << "\n\n";
+				<< "kmer size=" << opt::kmerLength << "\t"
+                << "coverage=" <<opt::coverage<< "\t"
+                << "compression level=" <<opt::compressionLevel<< "\n\n";
 
     if(opt::numThreads <= 1)
     {
         // Serial mode
         FMIndexWalkProcess processor(ecParams);
 
-		if (ecParams.algorithm == FMW_HYBRID || ecParams.algorithm == FMW_MERGE )
+		if (ecParams.algorithm == FMW_HYBRID || ecParams.algorithm == FMW_MERGE ) //請改這個
         SequenceProcessFramework::processSequencesSerial<SequenceWorkItemPair,
                                                          FMIndexWalkResult,
                                                          FMIndexWalkProcess,
@@ -263,6 +282,8 @@ void parseFMWalkOptions(int argc, char** argv)
 			case 'I': arg >> opt::maxInsertSize; break;
             case 'm': arg >> opt::minOverlap; break;
             case 'M': arg >> opt::maxOverlap; break;
+            case 'c': arg >> opt::coverage; break; ///mod1
+            case 'z': arg >> opt::compressionLevel; break;
             case OPT_LEARN: opt::bLearnKmerParams = true; break;
             case OPT_HELP:
                 std::cout << CORRECT_USAGE_MESSAGE;
@@ -300,6 +321,18 @@ void parseFMWalkOptions(int argc, char** argv)
     if(opt::kmerThreshold <= 0)
     {
         std::cerr << SUBPROGRAM ": invalid kmer threshold: " << opt::kmerThreshold << ", must be greater than zero\n";
+        die = true;
+    }
+
+    if(opt::coverage < 0) ///mod3
+    {
+        std::cerr << SUBPROGRAM ": invalid number of coverage: " << opt::coverage <<"\n";
+        die = true;
+    }
+
+    if(opt::compressionLevel < 0 || opt::compressionLevel > 11)
+    {
+        std::cerr << SUBPROGRAM ": invalid number of compression level: " << opt::compressionLevel <<", must be from 0 to 10(0 for not hashing).\n";
         die = true;
     }
 
