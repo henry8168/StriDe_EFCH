@@ -12,9 +12,7 @@
 #include <iomanip>
 #include "SAIntervalTree.h"
 
-
 //#define KMER_TESTING 1
-
 
 FMIndexWalkProcess::FMIndexWalkProcess(const FMIndexWalkParameters params) : m_params(params)
 {
@@ -22,13 +20,17 @@ FMIndexWalkProcess::FMIndexWalkProcess(const FMIndexWalkParameters params) : m_p
 
 FMIndexWalkProcess::~FMIndexWalkProcess()
 {
-
 }
 
 
 FMIndexWalkResult FMIndexWalkProcess::MergeAndKmerize(const SequenceWorkItemPair& workItemPair)
 {
 	FMIndexWalkResult result;
+	SAIntervalNodeResult* result1 = new SAIntervalNodeResult; //mod1
+	SAIntervalNodeResult* result2 = new SAIntervalNodeResult;
+	bool uniqueCase1; //mod3
+	bool uniqueCase2; 
+	IntervalMatchMap::accessor immAccessor;
 
 	//get parameters
 	size_t kmerLength = m_params.kmerLength ;
@@ -43,47 +45,202 @@ FMIndexWalkResult FMIndexWalkProcess::MergeAndKmerize(const SequenceWorkItemPair
 	
 	std::string firstKRstr = seqFirst.substr(0, m_params.minOverlap);
 	std::string secondKRstr  = seqSecond.substr(0, m_params.minOverlap);
+	
+	#pragma omp critical (idnumWorking) //long read id號碼牌機制 //mod2
+    {
+        m_idnum = *(m_params.idnum);
+        (*(m_params.idnum))++;
+    }
+    
 	if( isSuitableForFMWalk(firstKRstr, secondKRstr) )
-    {	
+    {
 		//maxOverlap is limited to 90% of read length which aims to prevent over-greedy search
 		size_t maxOverlap = m_params.maxOverlap!=-1?m_params.maxOverlap:
 											((workItemPair.first.read.seq.length()+workItemPair.second.read.seq.length())/2)*0.95;
+		
+		/*
+		const size_t RepeatKmerFreq = m_params.kd.getMedian()*1.2;    //mod5
+        size_t KmerFreq1 = BWTAlgorithms::countSequenceOccurrences( firstKRstr, m_params.indices.pBWT );
+        bool isFirstReadRepeat =  KmerFreq1 >= RepeatKmerFreq;
 
+        size_t KmerFreq2 = BWTAlgorithms::countSequenceOccurrences( secondKRstr, m_params.indices.pBWT );
+        bool isSecondReadRepeat =  KmerFreq2 >= RepeatKmerFreq;
+        */
 		std::string mergedseq1, mergedseq2;
-		//Walk from the 1st end to 2nd end											
-        SAIntervalTree SAITree1(&firstKRstr, m_params.minOverlap, maxOverlap, m_params.maxInsertSize, m_params.maxLeaves,
-                                            m_params.indices, reverseComplement(secondKRstr));
-        SAITree1.mergeTwoReads(mergedseq1);
-
-		//Walk from the 2nd end to 1st end using the other strand
-		SAIntervalTree SAITree2(&secondKRstr, m_params.minOverlap, maxOverlap, m_params.maxInsertSize, m_params.maxLeaves,
-											m_params.indices, reverseComplement(firstKRstr));
-
-		SAITree2.mergeTwoReads(mergedseq2);
+		intervalPackage interval[2]; //mod8-1
+		//Walk from the 1st end to 2nd end //mod6-1
+		uniqueCase1=1;
+        SAIntervalTree SAITree1(&firstKRstr, result1, interval[0], m_params.intervalMatchMapBWT, m_params.intervalMatchMapRBWT, uniqueCase1,
+        						m_params.coverage, m_params.compressionLevel, m_params.minOverlap, maxOverlap, m_params.maxInsertSize, m_params.maxLeaves,
+                                m_params.indices, reverseComplement(secondKRstr));
+        //Walk from the 2nd end to 1st end using the other strand //mod6-2
+		uniqueCase2=1;
+		SAIntervalTree SAITree2(&secondKRstr, result2, interval[1], m_params.intervalMatchMapBWT, m_params.intervalMatchMapRBWT, uniqueCase2,
+								m_params.coverage, m_params.compressionLevel, m_params.minOverlap, maxOverlap, m_params.maxInsertSize, m_params.maxLeaves,
+								m_params.indices, reverseComplement(firstKRstr));
+								
+        if(uniqueCase1 && uniqueCase2) SAITree1.mergeTwoReads(mergedseq1); //真正進行FMwalk的部份，去SAIntervalTree.cpp這份看看
+        //else std::cout<<m_idnum<<" skip"<<"\n";
+		if(uniqueCase1 && uniqueCase2) SAITree2.mergeTwoReads(mergedseq2);
+		//else std::cout<<m_idnum<<" skip"<<"\n";
 		
 		//Only one successful walk from first end, requiring maxUsedLeaves <=1 in order to avoid walking over chimera PE read.
 		if(!mergedseq1.empty() && mergedseq2.empty() && SAITree1.getMaxUsedLeaves()<=1 && SAITree2.getMaxUsedLeaves()<=1)
 		{
+		    
+		    if(uniqueCase1)
+		    {
+		        int sizeIntervalBWT = result1->pathIntervalBWT[0].size(); //mod4-3-1
+                for(int k=0;k<sizeIntervalBWT;k++)
+                {
+                    int64_t t_intervalBWT=result1->pathIntervalBWT[0].at(k);
+                    unsigned short t_order=result1->order.at(k);
+                    std::pair<int, unsigned short> t_pair;
+                    t_pair.first = m_idnum;
+                    t_pair.second = t_order;
+                    (*m_params.intervalMatchMapBWT).insert(immAccessor,t_intervalBWT);
+                        immAccessor->second.push_back(t_pair);
+                    immAccessor.release();
+                }
+                    
+                int sizeIntervalRBWT = (*result1).pathIntervalRBWT[0].size(); //mod4-3-2
+                for(int k=0;k<sizeIntervalRBWT;k++)
+                {
+                    int64_t t_intervalRBWT=result1->pathIntervalRBWT[0].at(k);
+                    unsigned short t_order=result1->order.at(k);
+                    std::pair<int, unsigned short> t_pair;
+                    t_pair.first = m_idnum;
+                    t_pair.second = t_order;
+                    (*m_params.intervalMatchMapRBWT).insert(immAccessor,t_intervalRBWT);
+                        immAccessor->second.push_back(t_pair);
+                    immAccessor.release();
+                }
+                    
+		    }
 			// std::cout << ">" << SAITree.getKmerCoverage()<< "\n" << mergedseq << "\n" ;
 			// std::cout << SAITree1.getMaxUsedLeaves() << "\t" << SAITree1.isBubbleCollapsed() << "\t" << SAITree2.getMaxUsedLeaves() << "\n";
 			// getchar();
 			result.merge = true ;
 			result.correctSequence = mergedseq1 ;
+			result.intervalpackage[0] = interval[0]; //mod9-1
+			result.intervalpackage[1] = interval[1];
+			result.idnum = m_idnum;
 			return result;
 		//Only one successful walk from second end
 		}else if( mergedseq1.empty() && !mergedseq2.empty() && SAITree2.getMaxUsedLeaves()<=1 && SAITree1.getMaxUsedLeaves() <=1)
 		{
+		    
+		    if(uniqueCase2)
+		    {
+		        int sizeIntervalBWT = result2->pathIntervalBWT[0].size();
+                for(int k=0;k<sizeIntervalBWT;k++)
+                {
+                    int64_t t_intervalBWT=result2->pathIntervalBWT[0].at(k);
+                    unsigned short t_order=result2->order.at(k);
+                    std::pair<int, unsigned short> t_pair;
+                    t_pair.first = m_idnum;
+                    t_pair.second = t_order;
+                    (*m_params.intervalMatchMapBWT).insert(immAccessor,t_intervalBWT);
+                        immAccessor->second.push_back(t_pair);
+                    immAccessor.release();
+                }
+		           
+                int sizeIntervalRBWT = result2->pathIntervalRBWT[0].size();
+                for(int k=0;k<sizeIntervalRBWT;k++)
+                {
+                    int64_t t_intervalRBWT=result2->pathIntervalRBWT[0].at(k);
+                    unsigned short t_order=result2->order.at(k);
+                    std::pair<int, unsigned short> t_pair;
+                    t_pair.first = m_idnum;
+                    t_pair.second = t_order;
+                    (*m_params.intervalMatchMapRBWT).insert(immAccessor,t_intervalRBWT);
+                        immAccessor->second.push_back(t_pair);
+                    immAccessor.release();
+                }
+                    
+		    }
 			result.merge = true ;
 			result.correctSequence = mergedseq2 ;
+			result.intervalpackage[0] = interval[0]; //mod9-2
+			result.intervalpackage[1] = interval[1];
+			result.idnum = m_idnum;
 			return result;
 		}
 		else if( !mergedseq1.empty() && !mergedseq2.empty() && ( mergedseq1 == reverseComplement(mergedseq2) )  )
 		{
+		    if(m_params.compressionLevel) //mod4
+		    {
+		        if(uniqueCase1 && (SAITree1.getKmerCoverage()>SAITree2.getKmerCoverage()))
+		        {   
+		            //mod9-3
+		            result.correctSequence = mergedseq1;
+		            int sizeIntervalBWT = result1->pathIntervalBWT[0].size(); //mod4-3-1
+                    for(int k=0;k<sizeIntervalBWT;k++)
+                    {
+                        int64_t t_intervalBWT=result1->pathIntervalBWT[0].at(k);
+                        unsigned short t_order=result1->order.at(k);
+                        std::pair<int, unsigned short> t_pair;
+                        t_pair.first = m_idnum;
+                        t_pair.second = t_order;
+                        (*m_params.intervalMatchMapBWT).insert(immAccessor,t_intervalBWT);
+                            immAccessor->second.push_back(t_pair);
+                        immAccessor.release();
+                    }
+                    
+                    int sizeIntervalRBWT = (*result1).pathIntervalRBWT[0].size(); //mod4-3-2
+                    for(int k=0;k<sizeIntervalRBWT;k++)
+                    {
+                        int64_t t_intervalRBWT=result1->pathIntervalRBWT[0].at(k);
+                        unsigned short t_order=result1->order.at(k);
+                        std::pair<int, unsigned short> t_pair;
+                        t_pair.first = m_idnum;
+                        t_pair.second = t_order;
+                        (*m_params.intervalMatchMapRBWT).insert(immAccessor,t_intervalRBWT);
+                            immAccessor->second.push_back(t_pair);
+                        immAccessor.release();
+                    }
+                    
+		        }
+		        else if(uniqueCase2)
+		        {
+		            //mod9-4
+		            result.correctSequence = mergedseq2;
+		            int sizeIntervalBWT = result2->pathIntervalBWT[0].size();
+                    for(int k=0;k<sizeIntervalBWT;k++)
+                    {
+                        int64_t t_intervalBWT=result2->pathIntervalBWT[0].at(k);
+                        unsigned short t_order=result2->order.at(k);
+                        std::pair<int, unsigned short> t_pair;
+                        t_pair.first = m_idnum;
+                        t_pair.second = t_order;
+                        (*m_params.intervalMatchMapBWT).insert(immAccessor,t_intervalBWT);
+                            immAccessor->second.push_back(t_pair);
+                        immAccessor.release();
+                    }
+		            
+                    int sizeIntervalRBWT = result2->pathIntervalRBWT[0].size();
+                    for(int k=0;k<sizeIntervalRBWT;k++)
+                    {
+                        int64_t t_intervalRBWT=result2->pathIntervalRBWT[0].at(k);
+                        unsigned short t_order=result2->order.at(k);
+                        std::pair<int, unsigned short> t_pair;
+                        t_pair.first = m_idnum;
+                        t_pair.second = t_order;
+                        (*m_params.intervalMatchMapRBWT).insert(immAccessor,t_intervalRBWT);
+                            immAccessor->second.push_back(t_pair);
+                        immAccessor.release();
+                    }
+                    
+		        }
+
+		    }
 			// std::cout << ">" << SAITree.getKmerCoverage()<< "\n" << mergedseq << "\n>" << SAITree2.getKmerCoverage()<< "\n" << mergedseq2 << "\n";
 			// std::cout << SAITree.getMaxUsedLeaves() << "\t" << SAITree.isBubbleCollapsed() << "\t" << SAITree2.getMaxUsedLeaves() << "\t" << SAITree2.isBubbleCollapsed()<<"\n";
 			// getchar();
 			result.merge = true ;
-			result.correctSequence = (SAITree1.getKmerCoverage()>SAITree2.getKmerCoverage())? mergedseq1:mergedseq2 ;
+			result.idnum = m_idnum;
+			result.intervalpackage[0] = interval[0]; 
+			result.intervalpackage[1] = interval[1];
 			return result;
 		}
 		// else if( !mergedseq1.empty() && !mergedseq2.empty() && (std::abs( (int)mergedseq1.length() - (int)mergedseq2.length()) <= 3))
@@ -94,8 +251,9 @@ FMIndexWalkResult FMIndexWalkProcess::MergeAndKmerize(const SequenceWorkItemPair
 		// }
     }
 	
+	if(!uniqueCase1 || !uniqueCase2) return result;
 	
-    /** Case 3: kmerize the remaining reads **/
+    //Case 3: kmerize the remaining reads
 	//Compute kmer freq of each kmer
 	KmerContext seqFirstKC(seqFirst, kmerLength, m_params.indices);
 	KmerContext seqSecondKC(seqSecond, kmerLength, m_params.indices);
@@ -105,35 +263,35 @@ FMIndexWalkResult FMIndexWalkProcess::MergeAndKmerize(const SequenceWorkItemPair
 	int firstMainIdx=-1, secondMainIdx=-1;
 
 	if(seqFirst.length()>=(size_t) kmerLength) 
-		firstMainIdx = splitRead( seqFirstKC, firstKR, threshold, m_params.indices);
+	    firstMainIdx = splitRead( seqFirstKC, firstKR, threshold, m_params.indices);
 	if(seqSecond.length()>=(size_t) kmerLength)
-		secondMainIdx = splitRead( seqSecondKC, secondKR, threshold, m_params.indices);
-    // /***trim and kmerize reads***/
+	    secondMainIdx = splitRead( seqSecondKC, secondKR, threshold, m_params.indices);
+    // //trim and kmerize reads
 
-    /*** write kmernized results***/
+    //write kmernized results
 	if (!firstKR.empty()) result.kmerize =true ;
 	if (!secondKR.empty()) result.kmerize2 =true ;
 	
 	for (int i = 0 ; i<(int)firstKR.size() ; i ++ )
 	{
-		std::string kmerRead = firstKR.at(i);
-		float GCratio =0 ;
-		if ( isLowComplexity (kmerRead,GCratio) ) continue;
-		if ( maxCon(kmerRead)*3 > kmerRead.length() ) continue;
-		if (i==firstMainIdx)  result.correctSequence = kmerRead ;
-		else
-			result.kmerizedReads.push_back(kmerRead);
+	    std::string kmerRead = firstKR.at(i);
+	    float GCratio =0 ;
+	    if ( isLowComplexity (kmerRead,GCratio) ) continue;
+	    if ( maxCon(kmerRead)*3 > kmerRead.length() ) continue;
+	    if (i==firstMainIdx)  result.correctSequence = kmerRead ;
+	    else
+		    result.kmerizedReads.push_back(kmerRead);
 	}
 
 	for (int i = 0 ; i<(int)secondKR.size() ; i ++ )
 	{
-		std::string kmerRead = secondKR.at(i);
-		float GCratio =0 ;
-		if ( isLowComplexity (kmerRead,GCratio) ) continue;
-		if ( maxCon(kmerRead)*3 > kmerRead.length() ) continue;
-		if (i==secondMainIdx)  result.correctSequence2 = kmerRead ;
-		else
-			result.kmerizedReads2.push_back(kmerRead);
+	    std::string kmerRead = secondKR.at(i);
+	    float GCratio =0 ;
+	    if ( isLowComplexity (kmerRead,GCratio) ) continue;
+	    if ( maxCon(kmerRead)*3 > kmerRead.length() ) continue;
+	    if (i==secondMainIdx)  result.correctSequence2 = kmerRead ;
+	    else
+		    result.kmerizedReads2.push_back(kmerRead);
 	}
 	
 	return result;
@@ -141,22 +299,28 @@ FMIndexWalkResult FMIndexWalkProcess::MergeAndKmerize(const SequenceWorkItemPair
 }
 
 
-FMIndexWalkResult FMIndexWalkProcess::MergePairedReads(const SequenceWorkItemPair& workItemPair)
+FMIndexWalkResult FMIndexWalkProcess::MergePairedReads(const SequenceWorkItemPair& workItemPair) 
 {
 	FMIndexWalkResult result;
 
 	//get parameters
-	// size_t kmerLength = m_params.kmerLength ;
-	size_t threshold = (size_t)CorrectionThresholds::Instance().getRequiredSupport(0)-1;
+	//size_t kmerLength = m_params.kmerLength ;
+	size_t threshold = (size_t)CorrectionThresholds::Instance().getRequiredSupport(0)-1; //抓kmer frequency的低谷為門檻值
 
 	std::string seqFirstOriginal  = workItemPair.first.read.seq.toString() ;
 	std::string seqSecondOriginal = workItemPair.second.read.seq.toString();
 
 	//Trim head and tail of both ends containing errors
-	std::string seqFirst = trimRead(seqFirstOriginal, m_params.kmerLength, threshold,m_params.indices);
-	std::string seqSecond = trimRead(seqSecondOriginal, m_params.kmerLength, threshold,m_params.indices);
+	std::string seqFirst = trimRead(seqFirstOriginal, m_params.kmerLength, threshold, m_params.indices); //indices就index的複數型
+	std::string seqSecond = trimRead(seqSecondOriginal, m_params.kmerLength, threshold, m_params.indices);
 
-	if(isSuitableForFMWalk(seqFirst, seqSecond))
+    #pragma omp critical (idnumWorking) //long read id號碼牌機制
+    {
+        m_idnum = *(m_params.idnum);
+        (*(m_params.idnum))++;
+    }
+    
+	if(isSuitableForFMWalk(seqFirst, seqSecond)) //看雙端reads長度是否至少有minOverlap length，且皆不為repeats
     {
 		//extract prefix of seqFirst
 		std::string firstKRstr = seqFirst.substr(0, m_params.minOverlap);	
@@ -165,18 +329,25 @@ FMIndexWalkResult FMIndexWalkProcess::MergePairedReads(const SequenceWorkItemPai
 	
 		//Walk from the 1st end to 2nd end
 		size_t maxOverlap = m_params.maxOverlap!=-1?m_params.maxOverlap:
-											((workItemPair.first.read.seq.length()+workItemPair.second.read.seq.length())/2)*0.9;
+											((workItemPair.first.read.seq.length()+workItemPair.second.read.seq.length())/2)*0.9;//設定「walk時當前暫時能記憶的最大長度，通常是FMindex的最大字串長度」(為啥叫Overlap啊？)，超過就回到kmerSize長度。http://goo.gl/WKxlnu
 											
-        SAIntervalTree SAITree(&firstKRstr, m_params.minOverlap, maxOverlap, m_params.maxInsertSize, m_params.maxLeaves,
-                                            m_params.indices, reverseComplement(secondKRstr), threshold);
+		intervalPackage interval1,interval2; //mod8-2
+		bool uniqueCase1=1;
+        SAIntervalTree SAITree(&firstKRstr, NULL, interval1, m_params.intervalMatchMapBWT, m_params.intervalMatchMapRBWT, uniqueCase1,
+        					   m_params.coverage, m_params.compressionLevel, m_params.minOverlap, maxOverlap, m_params.maxInsertSize, m_params.maxLeaves,
+                               m_params.indices, reverseComplement(secondKRstr), threshold);
         std::string mergedseq;
-        SAITree.mergeTwoReads(mergedseq);
+        if(uniqueCase1) SAITree.mergeTwoReads(mergedseq); //真正進行FMwalk的部份，去SAIntervalTree.cpp這份看看
+        //else std::cout<<m_idnum<<" skip"<<"\n";
 
 		//Walk from the 2nd end to 1st end 
-		SAIntervalTree SAITree2(&secondKRstr, m_params.minOverlap, maxOverlap, m_params.maxInsertSize, m_params.maxLeaves,
-											m_params.indices, reverseComplement(firstKRstr), threshold);
+		bool uniqueCase2=1;
+		SAIntervalTree SAITree2(&secondKRstr, NULL, interval2, m_params.intervalMatchMapBWT, m_params.intervalMatchMapRBWT, uniqueCase2,
+								m_params.coverage, m_params.compressionLevel, m_params.minOverlap, maxOverlap, m_params.maxInsertSize, m_params.maxLeaves,
+								m_params.indices, reverseComplement(firstKRstr), threshold);
 		std::string mergedseq2;
-		SAITree2.mergeTwoReads(mergedseq2);
+		if(uniqueCase2) SAITree2.mergeTwoReads(mergedseq2);
+		//else std::cout<<m_idnum<<" skip"<<"\n";
 			
 		//Unipath from 1st end but no path from 2nd end
 		if(!mergedseq.empty() && mergedseq2.empty() )
@@ -209,7 +380,7 @@ FMIndexWalkResult FMIndexWalkProcess::MergePairedReads(const SequenceWorkItemPai
 			// }
 			if(mergedseq.length()>maxOverlap){
 				result.merge = true ;
-				result.correctSequence = (SAITree.getKmerCoverage()>SAITree2.getKmerCoverage())? mergedseq:mergedseq2 ;
+				result.correctSequence = (SAITree.getKmerCoverage()>SAITree2.getKmerCoverage())? mergedseq:mergedseq2 ; //比對哪個merged的read的kmer frequency比較高，選它用
 				return result;
 			}
 		}
@@ -266,7 +437,8 @@ bool FMIndexWalkProcess::isSuitableForFMWalk(std::string& seqFirst, std::string&
 
 	//estimate repeat kmer
 	// const size_t RepeatKmerFreq = m_params.kd.getRepeatKmerCutoff();
-	const size_t RepeatKmerFreq = m_params.kd.getMedian()*1.3; 
+	const size_t RepeatKmerFreq = m_params.kd.getMedian()*1.3;
+	//std::cout<<"RepeatKmerFreq: "<<RepeatKmerFreq<<std::endl;
 	size_t KmerFreq1 = BWTAlgorithms::countSequenceOccurrences( seqFirst, m_params.indices.pBWT );
 	bool isFirstReadUnique =  KmerFreq1 < RepeatKmerFreq;
 
@@ -518,7 +690,7 @@ bool FMIndexWalkProcess::existNextStrongKmer(std::string kmer , NextKmerDir dir 
 }
 
 
-std::string FMIndexWalkProcess::trimRead( std::string readSeq, size_t kmerLength, size_t /*threshold*/, BWTIndexSet & index)
+std::string FMIndexWalkProcess::trimRead(std::string readSeq, size_t kmerLength, size_t /*threshold*/, BWTIndexSet & index)
 {
 	int head=0, tail=readSeq.length()-kmerLength;
 	// if (( kc.kmerFreqs_same[head] < threshold || kc.kmerFreqs_revc [head] < threshold ) && ( numNextKmer(kc.kmers[head],NK_START,index) == 0 ))
@@ -591,17 +763,17 @@ bool FMIndexWalkProcess::isSimple (std::string Lkmer, std::string Rkmer, BWTInde
 //
 //
 FMIndexWalkPostProcess::FMIndexWalkPostProcess(std::ostream* pCorrectedWriter,
-																				std::ostream* pDiscardWriter,
-																				const FMIndexWalkParameters params) :
-																													m_pCorrectedWriter(pCorrectedWriter),
-																													m_pDiscardWriter(pDiscardWriter),
-																													m_params(params),
-																													m_kmerizePassed(0),
-																													m_mergePassed(0),
-																													m_qcFail(0)
-																				{
-																					//m_ptmpWriter = createWriter("NoPESupport.fa");
-																				}
+											   std::ostream* pDiscardWriter,
+											   const FMIndexWalkParameters params) :
+																					m_pCorrectedWriter(pCorrectedWriter),
+																					m_pDiscardWriter(pDiscardWriter),
+																					m_params(params),
+																					m_kmerizePassed(0),
+																					m_mergePassed(0),
+																					m_qcFail(0)
+																				    {
+																					    //m_ptmpWriter = createWriter("NoPESupport.fa");
+																				    }
 
 //
 FMIndexWalkPostProcess::~FMIndexWalkPostProcess()
@@ -657,52 +829,385 @@ void FMIndexWalkPostProcess::process(const SequenceWorkItem& item, const FMIndex
 }
 
 // Writting results of FMW_HYBRID and FMW_MERGE
-void FMIndexWalkPostProcess::process(const SequenceWorkItemPair& itemPair, const FMIndexWalkResult& result)
+void FMIndexWalkPostProcess::process(const SequenceWorkItemPair& itemPair, const FMIndexWalkResult& result)  //寫入檔案 單核
 {
-	if (result.merge)
-        m_mergePassed += 1;
-	else if (  (m_params.algorithm == FMW_HYBRID)  && (result.kmerize ||  result.kmerize2) )
-	{
-		if (result.kmerize) m_kmerizePassed += 1;
-		else m_qcFail += 1;
-		if (result.kmerize2) m_kmerizePassed += 1;
-		else m_qcFail += 1;
-	}
-	else
-        m_qcFail += 2;
+    if(m_params.compressionLevel) //mod10
+    {
+        //第一階段
+        if (result.merge)
+        {
+            itemsForOutput nowResult;
+            nowResult.lrid = result.idnum;
+            nowResult.lrname = itemPair.first.read.id.substr (0, itemPair.first.read.id.find('/') );
+            nowResult.mergedread = result.correctSequence;
+            nowResult.FRBE[0] = result.intervalpackage[0];
+            nowResult.FRBE[1] = result.intervalpackage[1];
+            nowResult.pass = true;
+            
+            (*(m_params.itemsForOutputVector)).push_back(nowResult);
+        }
+        else if (  (m_params.algorithm == FMW_HYBRID)  && (result.kmerize ||  result.kmerize2) )
+	    {
+		    if (result.kmerize) m_kmerizePassed += 1;
+		    else m_qcFail += 1;
+		    if (result.kmerize2) m_kmerizePassed += 1;
+		    else m_qcFail += 1;
+	    }
+	    else
+            m_qcFail += 2;
 
-	SeqRecord firstRecord  = itemPair.first.read;
-	SeqRecord secondRecord  = itemPair.second.read;
+	    if((!(result.merge)) && m_params.algorithm == FMW_HYBRID )
+	    {
+	        SeqRecord firstRecord  = itemPair.first.read;
+	        SeqRecord secondRecord  = itemPair.second.read;
+	        
+		    if (!result.correctSequence.empty())
+		    {
+			    firstRecord.seq = result.correctSequence;
+			    firstRecord.write(*m_pDiscardWriter);
+		    }
+		    for (size_t i=0 ; i< result.kmerizedReads.size() ; i++)
+		    {
+			    firstRecord.seq = result.kmerizedReads[i];
+			    firstRecord.writeFasta(*m_pDiscardWriter,i);
+		    }
 
-	if (result.merge)
-	{
-		SeqItem mergeRecord ;
-		mergeRecord.id = firstRecord.id.substr (0, firstRecord.id.find('/') ) ;
-		mergeRecord.seq = result.correctSequence;
-		mergeRecord.write(*m_pCorrectedWriter);
-	}
-	else if(m_params.algorithm == FMW_HYBRID )
-	{
-		if (!result.correctSequence.empty())
-		{
-			firstRecord.seq = result.correctSequence;
-			firstRecord.write(*m_pDiscardWriter);
-		}
-		for (size_t i=0 ; i< result.kmerizedReads.size() ; i++)
-		{
-			firstRecord.seq = result.kmerizedReads[i];
-			firstRecord.writeFasta(*m_pDiscardWriter,i);
-		}
+		    if (!result.correctSequence2.empty())
+		    {
+			    secondRecord.seq = result.correctSequence2;
+			    secondRecord.write(*m_pDiscardWriter);
+		    }
+		    for (size_t i=0 ; i< result.kmerizedReads2.size() ; i++)
+		    {
+			    secondRecord.seq = result.kmerizedReads2[i];
+			    secondRecord.writeFasta(*m_pDiscardWriter,i);
+		    }
+	    }
+	    
+	    bool thelast = false;
+        std::vector<std::string> endingPair;
+        endingPair.push_back("ERR022075.12624868");                             //E.coli HiSeq
+        endingPair.push_back("SRR497465.4188852/1");                            //B.cereus HiSeq
+        endingPair.push_back("HWI-ST180_0186:3:68:20604:200520#GGCTAC/1");      //M.abscessus HiSeq
+        endingPair.push_back("SRR522244.4802516/1");                            //R.sphaeroides HiSeq
+        endingPair.push_back("HWI-ST180_0168:6:68:19576:200566#ACCAACT/1");     //V.cholerae HiSeq
+        
+        endingPair.push_back("SRR826450.150196.1");                             //E.coli MiSeq
+        endingPair.push_back("M00893:17:000000000-A1MP5:1:2114:16438:28884/1"); //B.cereus MiSeq
+        endingPair.push_back("M00708:13:000000000-A25GU:1:2114:14636:28326/1"); //M.abscessus MiSeq
+        endingPair.push_back("SRR522246.8439837/1");                            //R.sphaeroides MiSeq
+        endingPair.push_back("M00708:13:000000000-A25GU:1:2114:12798:28328/1"); //V.cholerae MiSeq*/
+        
+        for(int index=0;index<(int)(endingPair.size());index++)
+            if(!(itemPair.first.read.id.find(endingPair[index]) == std::string::npos))
+            {
+                thelast = true;
+                break;
+            }
+        
+        if(!thelast) return; //mod7，如果當下處理的不是最後一對HiSeq，在此中斷
+        else 
+        {
+            /*
+            int64_t bwtTableSize = 0; //mod11
+            std::cout<<"========================"<<std::endl;
+            
+            std::cout<<"bwt Hash Table has "<<(*(m_params.intervalMatchMapBWT)).size()<<" data"<<std::endl;
+            for(IntervalMatchMap::iterator j=(*(m_params.intervalMatchMapBWT)).begin();j!=(*(m_params.intervalMatchMapBWT)).end(); ++j){
+                bwtTableSize += 8;
+                bwtTableSize += (j->second.size())*4;
+            }
+            std::cout<<"bwt Hash Table size(bytes): "<<bwtTableSize<<std::endl;
+            
+            int64_t rbwtTableSize = 0;
+            std::cout<<"rbwt Hash Table has "<<(*(m_params.intervalMatchMapRBWT)).size()<<" data"<<std::endl;
+            for(IntervalMatchMap::iterator j=(*(m_params.intervalMatchMapRBWT)).begin();j!=(*(m_params.intervalMatchMapRBWT)).end(); ++j){
+                rbwtTableSize += 8;
+                rbwtTableSize += (j->second.size())*4;
+            }
+            std::cout<<"rbwt Hash Table size(bytes): "<<rbwtTableSize<<std::endl;
+            
+            std::cout<<"========================"<<std::endl;
+            */
+            
+            //第二階段
+            int itemsForOutputVectorSize = (*(m_params.itemsForOutputVector)).size();
+            std::cout<<"\nitemsForOutputVector_size: "<<itemsForOutputVectorSize<<std::endl<<std::endl;
+            
+            IntervalMatchMap *m_intervalMatchMapBWT;
+            IntervalMatchMap *m_intervalMatchMapRBWT;
+            size_t m_coverage;
+            size_t m_compressionLevel;
+            int64_t intervalGap;
+            //size_t atmosttimess;
+            //BWTInterval beginningkmerBWT,beginningkmerRBWT,endingkmerBWT,endingkmerRBWT;
+            //unsigned short beginningkmerOrder, endingkmerOrder;
+            unsigned short orderGap;
+            m_coverage = m_params.coverage;
+            m_compressionLevel = m_params.compressionLevel;
+            m_intervalMatchMapBWT = m_params.intervalMatchMapBWT;
+            m_intervalMatchMapRBWT = m_params.intervalMatchMapRBWT;
+            intervalGap = (int)(m_coverage*0.005*(11-m_compressionLevel));
+            if(intervalGap<1) intervalGap=1;
+            //orderGap = m_params.minOverlap;
+            orderGap = 0;
+            //atmosttimess = m_coverage/intervalGap;
+            
+            #pragma omp parallel for num_threads(m_params.numThreads)
+            for(int h=0; h<itemsForOutputVectorSize; h++)
+            {
+                //std::cout<<"cur_thread: "<<omp_get_thread_num()<<std::endl;
+                
+                bool uniqueCase;
+                IntervalMatchMap::accessor immAccessor;
+                bool fwdReadsExisted[2];
+                bool rvcReadsExisted[2];
+                std::vector<std::pair<int, unsigned short> > fwdBeginningIdOrder;
+                std::vector<std::pair<int, unsigned short> > rvcBeginningIdOrder;
+                std::vector<std::pair<int, unsigned short> > fwdEndingIdOrder;
+                std::vector<std::pair<int, unsigned short> > rvcEndingIdOrder;
+                int FBsize,FEsize,RBsize,REsize;
+                int FBid, FEid, RBid, REid;
+                unsigned short FBorder, FEorder, RBorder, REorder;
+                
+                fwdReadsExisted[0] = false;
+                rvcReadsExisted[0] = false;
+                fwdReadsExisted[1] = false;
+                rvcReadsExisted[1] = false;
+                uniqueCase = true;
+                
+                fwdBeginningIdOrder.clear();
+                rvcBeginningIdOrder.clear();
+                fwdEndingIdOrder.clear();
+                fwdEndingIdOrder.clear();
+                
+                for(int intp=0; intp<2 && (*(m_params.itemsForOutputVector)).at(h).pass; intp++)
+                {
+                    //正股起始檢查
+                    for(int64_t i=(int64_t)((*(m_params.itemsForOutputVector)).at(h).FRBE[intp].FBintervalRBWTx.lower); i<(int64_t)((*(m_params.itemsForOutputVector)).at(h).FRBE[intp].FBintervalRBWTx.upper); i+=intervalGap) //檢查正股起始kmer的interval是否包含於已存之interval
+                    {
+                        if((*m_intervalMatchMapRBWT).find(immAccessor,i))
+                        {
+                            fwdReadsExisted[0] = true;
+                            int sizeVector = immAccessor->second.size();
+                            for(int p=0;p<sizeVector;p++)
+                            {
+                                fwdBeginningIdOrder.push_back(immAccessor->second.at(p));
+                            }
+                        }
+                        immAccessor.release();
+                    }
+                
+                    //反股起始檢查
+                    for(int64_t i=(int64_t)((*(m_params.itemsForOutputVector)).at(h).FRBE[intp].RBintervalBWTx.lower); i<(int64_t)((*(m_params.itemsForOutputVector)).at(h).FRBE[intp].RBintervalBWTx.upper); i+=intervalGap) //檢查反股起始kmer的interval是否包含於已存之interval
+                    {
+                        if((*m_intervalMatchMapBWT).find(immAccessor,i))
+                        {
+                            rvcReadsExisted[0] = true;
+                            int sizeVector = immAccessor->second.size();
+                            for(int p=0;p<sizeVector;p++)
+                            {
+                                rvcBeginningIdOrder.push_back(immAccessor->second.at(p));
+                            }
+                        }
+                        immAccessor.release();
+                    }
+                
+                    //正股終點檢查
+                    for(int64_t i=(int64_t)((*(m_params.itemsForOutputVector)).at(h).FRBE[intp].FEintervalRBWTx.lower); i<(int64_t)((*(m_params.itemsForOutputVector)).at(h).FRBE[intp].FEintervalRBWTx.upper); i+=intervalGap) //檢查正股終點kmer的interval是否包含於已存之interval
+                    {
+                        if((*m_intervalMatchMapRBWT).find(immAccessor,i))
+                        {
+                            fwdReadsExisted[1] = true;
+                            int sizeVector = immAccessor->second.size();
+                            for(int p=0;p<sizeVector;p++)
+                            {
+                                fwdEndingIdOrder.push_back(immAccessor->second.at(p));
+                            }
+                        }
+                        immAccessor.release();
+                    }
+                
+                    //反股終點檢查
+                    for(int64_t i=(int64_t)((*(m_params.itemsForOutputVector)).at(h).FRBE[intp].REintervalBWTx.lower); i<(int64_t)((*(m_params.itemsForOutputVector)).at(h).FRBE[intp].REintervalBWTx.upper); i+=intervalGap) //檢查反股終點kmer的interval是否包含於已存之interval
+                    {
+                        if((*m_intervalMatchMapBWT).find(immAccessor,i))
+                        {
+                            rvcReadsExisted[1] = true;
+                            int sizeVector = immAccessor->second.size();
+                            for(int p=0;p<sizeVector;p++)
+                            {
+                                rvcEndingIdOrder.push_back(immAccessor->second.at(p));
+                            }
+                        }
+                        immAccessor.release();
+                    }
+                    /*
+                    int vSize = fwdBeginningIdOrder.size();
+                    if(vSize>178) std::cout<<vSize<<std::endl;
+                    vSize = rvcBeginningIdOrder.size();
+                    if(vSize>178) std::cout<<vSize<<std::endl;
+                    vSize = fwdEndingIdOrder.size();
+                    if(vSize>178) std::cout<<vSize<<std::endl;
+                    vSize = rvcEndingIdOrder.size();
+                    if(vSize>178) std::cout<<vSize<<std::endl;
+                    */
+                    //==========//
+                
+                    if(fwdReadsExisted[0] && fwdReadsExisted[1] && uniqueCase) //正正
+                    {
+                        FBsize = fwdBeginningIdOrder.size();
+                        FEsize = fwdEndingIdOrder.size();
+                        
+                        for(int i=0; i<FBsize && uniqueCase; i++)
+                            for(int j=0; j<FEsize && uniqueCase; j++)
+                            {
+                                FBid = fwdBeginningIdOrder.at(i).first;
+                                FEid = fwdEndingIdOrder.at(j).first;
+                                FBorder = fwdBeginningIdOrder.at(i).second;
+                                FEorder = fwdEndingIdOrder.at(j).second;
+                                if((FBid == FEid) && (FBorder+orderGap)<=FEorder && ((*(m_params.itemsForOutputVector)).at(h).lrid != FBid))
+                                {
+                                    uniqueCase = false;
+                                    //(*(m_params.itemsForOutputVector)).at(h).pass = false;
+                                    //std::cout<<"["<<(*(m_params.itemsForOutputVector)).at(h).lrname<<"] was discarded in 2nd Phase. FF\n";
+                                }
+                            }
+                    }
+                
+                    if(rvcReadsExisted[0] && rvcReadsExisted[1] && uniqueCase) //反反
+                    {
+                        RBsize = rvcBeginningIdOrder.size();
+                        REsize = rvcEndingIdOrder.size();
+                        
+                        for(int i=0; i<RBsize && uniqueCase; i++)
+                            for(int j=0; j<REsize && uniqueCase; j++)
+                            {
+                                RBid = rvcBeginningIdOrder.at(i).first;
+                                REid = rvcEndingIdOrder.at(j).first;
+                                RBorder = rvcBeginningIdOrder.at(i).second;
+                                REorder = rvcEndingIdOrder.at(j).second;
+                                if((RBid == REid) && (RBorder+orderGap)<=REorder && ((*(m_params.itemsForOutputVector)).at(h).lrid != RBid))
+                                {
+                                    uniqueCase = false;
+                                    //(*(m_params.itemsForOutputVector)).at(h).pass = false;
+                                    //std::cout<<"["<<(*(m_params.itemsForOutputVector)).at(h).lrname<<"] was discarded in 2nd Phase. RR\n";
+                                }
+                            }
+                    }
+                
+                
+                    if(fwdReadsExisted[0] && rvcReadsExisted[1] && uniqueCase) //正反
+                    {
+                        FBsize = fwdBeginningIdOrder.size();
+                        REsize = rvcEndingIdOrder.size();
+                        
+                        for(int i=0; i<FBsize && uniqueCase; i++)
+                            for(int j=0; j<REsize && uniqueCase; j++)
+                            {
+                                FBid = fwdBeginningIdOrder.at(i).first;
+                                REid = rvcEndingIdOrder.at(j).first;
+                                FBorder = fwdBeginningIdOrder.at(i).second;
+                                REorder = rvcEndingIdOrder.at(j).second;
+                                if((FBid == REid) && (FBorder+orderGap)<=REorder && ((*(m_params.itemsForOutputVector)).at(h).lrid != FBid))
+                                {
+                                    uniqueCase = false;
+                                    //(*(m_params.itemsForOutputVector)).at(h).pass = false;
+                                    //std::cout<<"["<<(*(m_params.itemsForOutputVector)).at(h).lrname<<"] was discarded in 2nd Phase. FR\n";
+                                }
+                            }
+                    }
+                
+                    if(rvcReadsExisted[0] && fwdReadsExisted[1] && uniqueCase) //反正
+                    {
+                        RBsize = rvcBeginningIdOrder.size();
+                        FEsize = fwdEndingIdOrder.size();
+                        
+                        for(int i=0; i<RBsize && uniqueCase; i++)
+                            for(int j=0; j<FEsize && uniqueCase; j++)
+                            {
+                                RBid = rvcBeginningIdOrder.at(i).first;
+                                FEid = fwdEndingIdOrder.at(j).first;
+                                RBorder = rvcBeginningIdOrder.at(i).second;
+                                FEorder = fwdEndingIdOrder.at(j).second;
+                                if((RBid == FEid) && (RBorder+orderGap)<=FEorder && ((*(m_params.itemsForOutputVector)).at(h).lrid != RBid))
+                                {
+                                    uniqueCase = false;
+                                    //(*(m_params.itemsForOutputVector)).at(h).pass = false;
+                                    //std::cout<<"["<<(*(m_params.itemsForOutputVector)).at(h).lrname<<"] was discarded in 2nd Phase. RF\n";
+                                }
+                            }
+                    }
+                    
+                    if(!uniqueCase) (*(m_params.itemsForOutputVector)).at(h).pass = false;
+                }
+            }
+                
+            
+            //第三階段
+            for(int h=0; h<itemsForOutputVectorSize; h++)
+            {
+                if(((*(m_params.itemsForOutputVector)).at(h).pass) == false) continue;
+                
+                m_mergePassed+=1;
+                
+                SeqItem mergeRecord ;
+		        mergeRecord.id = (*(m_params.itemsForOutputVector)).at(h).lrname;
+		        mergeRecord.seq = (*(m_params.itemsForOutputVector)).at(h).mergedread;
+		        mergeRecord.write(*m_pCorrectedWriter);
+            }
+            
+        
+            return;
+        }
+    }
+    else
+    {
+	    if (result.merge)
+            m_mergePassed += 1;
+	    else if (  (m_params.algorithm == FMW_HYBRID)  && (result.kmerize ||  result.kmerize2) )
+	    {
+		    if (result.kmerize) m_kmerizePassed += 1;
+		    else m_qcFail += 1;
+		    if (result.kmerize2) m_kmerizePassed += 1;
+		    else m_qcFail += 1;
+	    }
+	    else
+            m_qcFail += 2;
 
-		if (!result.correctSequence2.empty())
-		{
-			secondRecord.seq = result.correctSequence2;
-			secondRecord.write(*m_pDiscardWriter);
-		}
-		for (size_t i=0 ; i< result.kmerizedReads2.size() ; i++)
-		{
-			secondRecord.seq = result.kmerizedReads2[i];
-			secondRecord.writeFasta(*m_pDiscardWriter,i);
-		}
-	}
+	    SeqRecord firstRecord  = itemPair.first.read;
+	    SeqRecord secondRecord  = itemPair.second.read;
+
+	    if (result.merge)
+	    {
+		    SeqItem mergeRecord ;
+		    mergeRecord.id = firstRecord.id.substr (0, firstRecord.id.find('/') ) ;
+		    mergeRecord.seq = result.correctSequence;
+		    mergeRecord.write(*m_pCorrectedWriter);
+	    }
+	    else if(m_params.algorithm == FMW_HYBRID )
+	    {
+		    if (!result.correctSequence.empty())
+		    {
+			    firstRecord.seq = result.correctSequence;
+			    firstRecord.write(*m_pDiscardWriter);
+		    }
+		    for (size_t i=0 ; i< result.kmerizedReads.size() ; i++)
+		    {
+			    firstRecord.seq = result.kmerizedReads[i];
+			    firstRecord.writeFasta(*m_pDiscardWriter,i);
+		    }
+
+		    if (!result.correctSequence2.empty())
+		    {
+			    secondRecord.seq = result.correctSequence2;
+			    secondRecord.write(*m_pDiscardWriter);
+		    }
+		    for (size_t i=0 ; i< result.kmerizedReads2.size() ; i++)
+		    {
+			    secondRecord.seq = result.kmerizedReads2[i];
+			    secondRecord.writeFasta(*m_pDiscardWriter,i);
+		    }
+	    }
+    }
 }
