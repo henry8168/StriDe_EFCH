@@ -10,7 +10,8 @@
 #ifndef FMIndexWalkProcess_H
 #define FMIndexWalkProcess_H
 
-#include "HashMap.h"
+//#include "HashMap.h"
+#include "typedef_IntervalMatchMap.h"
 #include "Util.h"
 #include "SequenceProcessFramework.h"
 #include "SequenceWorkItem.h"
@@ -20,10 +21,11 @@
 #include "BWTAlgorithms.h"
 #include "BitVector.h"
 #include "KmerDistribution.h"
+#include <omp.h>
 
 enum FMIndexWalkAlgorithm
 {
-	FMW_KMERIZE,
+    FMW_KMERIZE,
 	FMW_MERGE,
 	FMW_HYBRID
 };
@@ -51,8 +53,15 @@ struct FMIndexWalkParameters
 	int maxInsertSize;
     int minOverlap;
 	int maxOverlap;
-	
-	KmerDistribution	 kd;
+	IntervalMatchMap *intervalMatchMapBWT; ///mod1
+	IntervalMatchMap *intervalMatchMapRBWT;
+    int coverage;
+    int compressionLevel;
+    int *idnum;
+    std::vector<itemsForOutput> *itemsForOutputVector;
+    int numThreads;
+
+	KmerDistribution kd;
 
 };
 
@@ -72,7 +81,7 @@ struct KmerContext
 	//originalSeq
 	KmerContext(std::string seq,size_t kl, BWTIndexSet & index)
 	{
-		if( seq.length() >= kl)
+		if( seq.length() >= kl) //kl = kmerLength
 		{
 			readSeq = seq ;
 			readLength = readSeq.length();
@@ -133,6 +142,9 @@ class FMIndexWalkResult
     public:
         FMIndexWalkResult()
 		: kmerize(false),kmerize2(false),merge(false),merge2(false) {}
+		
+		intervalPackage intervalpackage[2]; //mod2
+		int idnum;
 
         DNAString correctSequence;
 		DNAString correctSequence2;
@@ -223,10 +235,7 @@ class FMIndexWalkProcess
 		size_t maxCon (std::string s);
 
         FMIndexWalkParameters m_params;
-
-
-
-
+        int m_idnum;
 };
 
 // Write the results from the overlap step to an ASQG file
