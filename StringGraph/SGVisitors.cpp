@@ -14,6 +14,7 @@
 #include "BWTAlgorithms.h"
 #include <iomanip>
 #include "SAIntervalTree.h"
+
 //
 // SGFastaVisitor - output the vertices in the graph in
 // fasta format
@@ -1510,7 +1511,7 @@ void SGJoinIslandVisitor::updateExtendedVertex(Vertex* pVertex, std::string& new
 bool SGJoinIslandVisitor::visit(StringGraph* pGraph, Vertex* pVertex)
 {
     bool changed=false;
-
+    
 	//this visitor only processes islands or tips with size >=m_minIslandSize
     if( (pVertex->countEdges(ED_SENSE)==0 || pVertex->countEdges(ED_ANTISENSE)==0)  && pVertex->getSeqLen()>=m_minIslandSize)
     {
@@ -1567,8 +1568,10 @@ bool SGJoinIslandVisitor::visit(StringGraph* pGraph, Vertex* pVertex)
 					//Step 2: perform FM index walk between pV and pW
 					for(size_t i=0; i<m_numOfIterations; i++)	//perform 2 runs of FM index walk
 					{
+                        bool uniqueCase=1;
+                        intervalPackage package_t;
 						std::string StartStr=pWStrRvc.substr(0,pWStrRvc.length()-i*m_kmer);
-						SAIntervalTree SAITree(&StartStr, m_kmer, 100, StartStr.length()+m_SAISearchDepth, m_SAISearchLeaves, m_indices, pVstr,1,true);
+						SAIntervalTree SAITree(&StartStr, NULL, package_t, NULL, NULL, uniqueCase, 100, 0, m_kmer, 100, StartStr.length()+m_SAISearchDepth, m_SAISearchLeaves, m_indices, pVstr,1,true);
 						std::string mergedseq;
 						SAITree.mergeTwoReads(mergedseq);
 						
@@ -1609,8 +1612,10 @@ bool SGJoinIslandVisitor::visit(StringGraph* pGraph, Vertex* pVertex)
 					//Step 2: perform FM index walk between pV and pW
 					for(size_t i=0; i<m_numOfIterations; i++)	//perform 2 runs of FM index walk
 					{
+                        bool uniqueCase=1;
+                        intervalPackage package_t;
 						std::string StartStr=pWstr.substr(0,pWstr.length()-i*m_kmer);
-						SAIntervalTree SAITree(&StartStr, m_kmer, 100, StartStr.length()+m_SAISearchDepth, m_SAISearchLeaves,m_indices, pVstr,1,true);
+						SAIntervalTree SAITree(&StartStr, NULL, package_t, NULL, NULL, uniqueCase, 100, 0, m_kmer, 100, StartStr.length()+m_SAISearchDepth, m_SAISearchLeaves,m_indices, pVstr,1,true);
 						std::string mergedseq;
 						SAITree.mergeTwoReads(mergedseq);
 
@@ -1645,8 +1650,10 @@ bool SGJoinIslandVisitor::visit(StringGraph* pGraph, Vertex* pVertex)
 					//Step 2: perform FM index walk between pV and pW
 					for(size_t i=0; i<m_numOfIterations; i++)	//perform 2 runs of FM index walk
 					{
+                        bool uniqueCase=1;
+                        intervalPackage package_t;
 						std::string StartStr=pVstr.substr(0,pVstr.length()-i*m_kmer);
-						SAIntervalTree SAITree(&StartStr, m_kmer, 100, StartStr.length()+m_SAISearchDepth, m_SAISearchLeaves, m_indices, pWStrRvc,1,true);
+						SAIntervalTree SAITree(&StartStr, NULL, package_t, NULL, NULL, uniqueCase, 100, 0, m_kmer, 100, StartStr.length()+m_SAISearchDepth, m_SAISearchLeaves, m_indices, pWStrRvc,1,true);
 						std::string mergedseq; 
 						SAITree.mergeTwoReads(mergedseq);
 
@@ -1680,8 +1687,10 @@ bool SGJoinIslandVisitor::visit(StringGraph* pGraph, Vertex* pVertex)
 					//Step 2: perform FM index walk between pV and pW
 					for(size_t i=0; i<m_numOfIterations; i++)	//perform 2 runs of FM index walk
 					{
+                        bool uniqueCase=1;
+                        intervalPackage package_t;
 						std::string StartStr=pVstr.substr(0,pVstr.length()-i*m_kmer);
-						SAIntervalTree SAITree(&StartStr, m_kmer, 100, StartStr.length()+m_SAISearchDepth, m_SAISearchLeaves,m_indices, pWstr,1,true);
+						SAIntervalTree SAITree(&StartStr, NULL, package_t, NULL, NULL, uniqueCase, 100, 0, m_kmer, 100, StartStr.length()+m_SAISearchDepth, m_SAISearchLeaves,m_indices, pWstr,1,true);
 						std::string mergedseq; 
 						SAITree.mergeTwoReads(mergedseq);
 						
