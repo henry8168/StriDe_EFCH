@@ -3,7 +3,7 @@
 // Old visitors were revised by YTH while adding new visitors specific for the hybrid graph
 // Released under the GPL
 //-----------------------------------------------
-//一起開心改Code!!這是Hash Table版
+//
 // SGVisitors - Algorithms that visit
 // each vertex in the graph and perform some
 // operation
